@@ -92,14 +92,17 @@ def fetch_jina_data(target, is_search=False):
 
 # --- 5. 核心邏輯：AI 對話 (含記憶處理) ---
 def get_ai_response(user_input, reference_content=None, history=[]):
-    system_message = {
-        "role": "system", 
-        "content": (
-            "你是一位全能 AI 助手 EaseMate。你具備博學的知識，能處理藝術、科學、歷史、法律等各種話題。"
-            "請務必根據對話的上下文(Context)來回答。如果用戶的問題是延續前文，請保持主題一致。"
-            "除非用戶明確要求查詢法規，否則不要主動提及食品法規。請使用繁體中文並以 Markdown 格式回答。"
-        )
-    }
+# 在 main.py 中修改這段指令
+system_message = {
+    "role": "system", 
+    "content": (
+        "你是一位全能且主動的 AI 助手 EaseMate。你具備博學的知識，能處理任何話題。"
+        "【重要指令】："
+        "1. 務必根據上下文回答。如果用戶問法規，即使搜尋結果有限，也要根據你已知的知識庫（如標檢局、食藥署的一般準則）給出具體的方向，不要只說『我沒有資料』。"
+        "2. 如果搜尋結果包含網頁內容，請詳細摘要重點。"
+        "3. 保持專業、主動、且具備解決問題的態度。請使用繁體中文並以 Markdown 格式回答。"
+    )
+}
     
     messages = [system_message]
     
@@ -149,3 +152,4 @@ def home(): return {"status": "EaseMate AI Ultimate Online"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
