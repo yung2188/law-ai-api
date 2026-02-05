@@ -93,5 +93,7 @@ def handle_message(event):
     )
 
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
+    # 這行非常重要：Render 會隨機分配 Port，必須讀取環境變數
+    port = int(os.environ.get('PORT', 10000))
+    # 必須設定 host='0.0.0.0'
     app.run(host='0.0.0.0', port=port)
