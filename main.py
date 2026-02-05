@@ -1,6 +1,6 @@
 import os
 import requests
-import threading  # 👈 新增：用於背景處理
+import threading
 from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -21,9 +21,8 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
-# --- 2. 核心邏輯函式 ---
-def search_and_ask_task(reply_token, query):
-    """在背景執行的任務：搜尋 + AI 思考 + 回傳 LINE"""
+# --- 2. 核心邏輯函式 (同步版本，供網頁與 LINE 背景任務使用) ---
+def get_ai_response(query):
     try:
         # A. Tavily 搜尋
         print(f"🔍 正在搜尋: {query}")
@@ -46,19 +45,24 @@ def search_and_ask_task(reply_token, query):
         response = requests.post(url, json=payload, headers=headers, timeout=60)
         
         if response.status_code == 200:
-            answer = response.json().get("textResponse", "AI 暫時無法回答")
+            return response.json().get("textResponse", "AI 暫時無法回答")
         else:
-            answer = f"AnythingLLM 錯誤: {response.status_code}"
-            print(f"❌ Error: {response.text}")
-
-        # C. 回傳給 LINE (使用 reply_token)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=answer))
-        print("✅ 成功回傳訊息給 LINE")
-
+            print(f"❌ AnythingLLM 報錯: {response.text}")
+            return f"AnythingLLM 錯誤: {response.status_code}"
     except Exception as e:
         print(f"❌ 系統異常: {str(e)}")
+        return f"系統錯誤: {str(e)}"
 
-# --- 3. 路由設定 ---
+# --- 3. 背景任務 (專給 LINE 使用) ---
+def line_background_task(reply_token, query):
+    answer = get_ai_response(query)
+    try:
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=answer))
+        print("✅ 成功回傳訊息給 LINE")
+    except Exception as e:
+        print(f"❌ LINE 回傳失敗: {e}")
+
+# --- 4. 路由設定 ---
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -68,25 +72,28 @@ def callback():
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-    return 'OK'  # 👈 這裡立刻回傳 OK 給 LINE，避免逾時
+    return 'OK'
 
+# 網頁版專用接口
 @app.route("/research", methods=['POST'])
 def research():
     data = request.json
     user_msg = data.get("message")
-    # 網頁版不需要非同步，直接呼叫
-    # (為了簡化，這裡暫時直接回傳搜尋結果，或你可以另外寫一個同步函式)
-    return jsonify({"textResponse": "網頁版請稍候..."})
+    if not user_msg:
+        return jsonify({"textResponse": "請輸入訊息"}), 400
+    
+    # 網頁版需要同步回傳結果
+    answer = get_ai_response(user_msg)
+    return jsonify({"textResponse": answer})
 
-# --- 4. LINE 訊息處理 ---
+# --- 5. LINE 訊息處理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text.strip()
     reply_token = event.reply_token
     
-    # 🚀 關鍵：開啟一個新執行緒 (Thread) 來處理耗時任務
-    # 這樣主程式可以立刻回傳 'OK' 給 LINE 伺服器
-    thread = threading.Thread(target=search_and_ask_task, args=(reply_token, user_msg))
+    # 開啟背景執行緒處理 LINE 訊息，避免 LINE 逾時
+    thread = threading.Thread(target=line_background_task, args=(reply_token, user_msg))
     thread.start()
 
 if __name__ == "__main__":
