@@ -1,169 +1,97 @@
 import os
 import requests
-import time
-import urllib.parse
-from groq import Groq
-from fastapi import FastAPI, BackgroundTasks
-from pydantic import BaseModel
-import uvicorn
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from tavily import TavilyClient
 
-# --- 1. 雲端環境設定 ---
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-MODEL_NAME = "llama-3.3-70b-versatile"
+app = Flask(__name__)
 
-# --- 2. AnythingLLM 設定 ---
+# --- 1. 環境變數與 API 金鑰設定 ---
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+
+# Tavily 設定
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "tvly-dev-BqleJF10jLZhAIJHyvO050hVi3z")
+tavily = TavilyClient(api_key=TAVILY_API_KEY)
+
+# AnythingLLM 設定
 ANYTHING_LLM_BASE_URL = os.environ.get("ANYTHING_LLM_URL", "https://ela-gravid-glenda.ngrok-free.dev")
 ANYTHING_LLM_API_KEY = os.environ.get("ANYTHING_LLM_KEY", "ZPHEBVH-6RPMJ4M-NK5VP5D-H2X6DY5")
 WORKSPACE_SLUG = "business-intelligence"
 
-app = FastAPI()
-client = Groq(api_key=GROQ_API_KEY)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-class ChatRequest(BaseModel):
-    url: str = None
-    keyword: str = None
-    history: list = []
-    client_name: str = "User"
+# --- 2. 核心功能函式 ---
 
-# --- 3. 核心邏輯：自動寫入 AnythingLLM 右側大腦 ---
-def save_to_anything_llm(content, title):
-    if not ANYTHING_LLM_BASE_URL or "ngrok" not in ANYTHING_LLM_BASE_URL:
-        return
-
-    api_url = f"{ANYTHING_LLM_BASE_URL.rstrip('/')}/api/v1/workspace/{WORKSPACE_SLUG}/update-embeddings"
-    headers = {
-        "Authorization": f"Bearer {ANYTHING_LLM_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "adds": [
-            {
-                "textContent": content,
-                "metadata": {
-                    "title": f"AutoLearn_{int(time.time())}",
-                    "description": title[:50],
-                    "source": "EaseMate_AI_Crawler"
-                }
-            }
-        ]
-    }
-    
+def search_with_tavily(query):
+    """使用 Tavily 獲取即時法規或資訊"""
     try:
-        res = requests.post(api_url, json=payload, headers=headers, timeout=30)
-        if res.status_code == 200:
-            print(f"✅ 知識已自動寫入 AnythingLLM: {title[:20]}")
+        print(f"🔍 正在搜尋：{query}")
+        response = tavily.search(query=query, search_depth="advanced", max_results=3)
+        context = ""
+        for r in response['results']:
+            context += f"\n來源: {r['title']}\n內容: {r['content']}\n"
+        return context
+    except Exception as e:
+        print(f"Tavily 錯誤: {e}")
+        return ""
+
+def ask_anything_llm(question, context=""):
+    """將問題與搜尋到的資料送往 AnythingLLM 進行總結回答"""
+    try:
+        url = f"{ANYTHING_LLM_BASE_URL}/api/v1/workspace/{WORKSPACE_SLUG}/chat"
+        headers = {
+            "Authorization": f"Bearer {ANYTHING_LLM_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # 組合 Prompt：讓 AI 根據搜尋結果回答
+        full_prompt = f"請根據以下參考資訊回答問題：\n{context}\n\n問題：{question}" if context else question
+        
+        payload = {
+            "message": full_prompt,
+            "mode": "chat"
+        }
+        
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            return response.json().get("textResponse", "AI 暫時無法回答")
         else:
-            print(f"⚠️ AnythingLLM 寫入失敗: {res.status_code}")
+            return f"AnythingLLM 錯誤: {response.status_code}"
     except Exception as e:
-        print(f"❌ AnythingLLM 連線異常: {e}")
+        return f"連線到 AnythingLLM 失敗: {str(e)}"
 
-# --- 4. 核心邏輯：抓取資料 (含 Google 備案搜尋) ---
-def fetch_jina_data(target, is_search=False):
-    safe_target = urllib.parse.quote(target)
-    
-    # 1. 優先嘗試 Jina 標準搜尋 (s.jina.ai)
-    prefix = "s" if is_search else "r"
-    jina_url = f"https://{prefix}.jina.ai/{safe_target}"
-    
+# --- 3. Line Bot 路由與事件處理 ---
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
     try:
-        response = requests.get(jina_url, timeout=35)
-        if response.status_code == 200 and len(response.text.strip()) > 500: # 增加長度判斷，確保不是抓到錯誤頁面
-            return response.text
-    except:
-        pass
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return 'OK'
 
-    # 2. 備案：如果搜尋失敗，改用 DuckDuckGo (它不會擋 Jina)
-    if is_search:
-        print(f"⚠️ Jina 搜尋失敗，啟動 DuckDuckGo 備案搜尋...")
-        # DuckDuckGo 的 HTML 版本對爬蟲非常友善
-        ddg_url = f"https://duckduckgo.com/html/?q={safe_target}"
-        backup_url = f"https://r.jina.ai/{ddg_url}"
-        try:
-            res = requests.get(backup_url, timeout=30)
-            if res.status_code == 200:
-                print("✅ DuckDuckGo 備案搜尋成功！")
-                return res.text
-        except:
-            pass
-            
-    return None
-    # --- 關鍵備案邏輯：如果搜尋模式失敗，強制爬取 Google 搜尋結果頁面 ---
-    if is_search:
-        print(f"⚠️ Jina 搜尋失敗，啟動 Google 備案搜尋...")
-        google_url = f"https://www.google.com/search?q={safe_target}"
-        backup_url = f"https://r.jina.ai/{google_url}"
-        try:
-            res = requests.get(backup_url, timeout=30)
-            if res.status_code == 200:
-                print("✅ Google 備案搜尋成功！")
-                return res.text
-        except:
-            pass
-            
-    return None
-
-# --- 5. 核心邏輯：AI 對話 (含記憶處理) ---
-def get_ai_response(user_input, reference_content=None, history=[]):
-# 在 main.py 中修改這段指令
-system_message = {
-    "role": "system", 
-    "content": (
-        "你是一位全能且主動的 AI 助手 EaseMate。你具備博學的知識，能處理任何話題。"
-        "【重要指令】："
-        "1. 務必根據上下文回答。如果用戶問法規，即使搜尋結果有限，也要根據你已知的知識庫（如標檢局、食藥署的一般準則）給出具體的方向，不要只說『我沒有資料』。"
-        "2. 如果搜尋結果包含網頁內容，請詳細摘要重點。"
-        "3. 保持專業、主動、且具備解決問題的態度。請使用繁體中文並以 Markdown 格式回答。"
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_msg = event.message.text.strip()
+    
+    # 1. 先進行 Tavily 搜尋
+    search_context = search_with_tavily(user_msg)
+    
+    # 2. 將搜尋結果餵給 AnythingLLM 進行整理
+    final_answer = ask_anything_llm(user_msg, search_context)
+    
+    # 3. 回傳最終結果給 Line 使用者
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=final_answer)
     )
-}
-    
-    messages = [system_message]
-    
-    # 注入歷史紀錄
-    for msg in history[-8:]:
-        if isinstance(msg, dict) and "role" in msg and "content" in msg:
-            messages.append({"role": msg["role"], "content": msg["content"]})
-    
-    # 加入當前問題
-    current_content = user_input
-    if reference_content:
-        current_content += f"\n\n【即時參考資料】\n{reference_content[:8000]}"
-    
-    messages.append({"role": "user", "content": current_content})
-
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.7
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        return f"AI 思考出錯：{str(e)}"
-
-# --- 6. API 路由 ---
-@app.post("/research")
-async def chat_endpoint(request: ChatRequest, background_tasks: BackgroundTasks):
-    target = request.url if request.url else request.keyword
-    
-    reference = None
-    if target:
-        # 智慧觸發：網址或長度 > 6 的問題才爬蟲
-        if target.startswith("http") or len(target) > 6:
-            is_search = not target.startswith("http")
-            reference = fetch_jina_data(target, is_search=is_search)
-            
-            # 爬取成功則背景存入知識庫
-            if reference:
-                background_tasks.add_task(save_to_anything_llm, reference, target)
-    
-    answer = get_ai_response(target, reference, request.history)
-    return {"report": answer}
-
-@app.get("/")
-def home(): return {"status": "EaseMate AI Ultimate Online"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-
-
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
