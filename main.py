@@ -15,7 +15,7 @@ MODEL_NAME = "llama-3.3-70b-versatile"
 # 如果使用 Ngrok，網址會像 https://xxxx.ngrok-free.app
 ANYTHING_LLM_BASE_URL = "https://ela-gravid-glenda.ngrok-free.dev" 
 ANYTHING_LLM_API_KEY = "ZPHEBVH-6RPMJ4M-NK5VP5D-H2X6DY5"
-WORKSPACE_SLUG = "Business_Intelligence" # 例如: law-knowledge
+WORKSPACE_SLUG = "business-intelligence" # 例如: law-knowledge
 
 app = FastAPI()
 client = Groq(api_key=GROQ_API_KEY)
@@ -122,3 +122,4 @@ def home(): return {"status": "EaseMate AI with Knowledge Base is Online"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
