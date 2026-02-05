@@ -34,46 +34,55 @@ def fetch_by_jina(target, mode="r"):
     safe_target = urllib.parse.quote(target)
     jina_url = f"https://{mode}.jina.ai/{safe_target}"
     
-    print(f"正在呼叫 Jina ({mode}): {jina_url}")
+    print(f"--- 啟動 Jina 請求 ({mode}) ---")
+    print(f"目標: {target}")
+    print(f"網址: {jina_url}")
     
-    try:
-        # 搜尋模式通常需要較長時間，設定 40 秒超時
-        response = requests.get(jina_url, timeout=40)
-        
-        if response.status_code == 200 and len(response.text.strip()) > 100:
-            return response.text
-        else:
-            print(f"Jina 回傳異常: Status {response.status_code}, Length {len(response.text) if response.text else 0}")
-            return None
-    except Exception as e:
-        print(f"Jina 連線發生異常: {str(e)}")
-        return None
+    # 嘗試最多 2 次重試機制
+    for attempt in range(2):
+        try:
+            # 搜尋模式 (s) 需要較長時間，設定 50 秒超時
+            timeout_sec = 50 if mode == "s" else 30
+            response = requests.get(jina_url, timeout=timeout_sec)
+            
+            if response.status_code == 200 and len(response.text.strip()) > 100:
+                print(f"✅ Jina 請求成功 (長度: {len(response.text)})")
+                return response.text
+            
+            print(f"⚠️ 第 {attempt+1} 次嘗試失敗: Status {response.status_code}")
+            if attempt == 0: 
+                print("等待 2 秒後重試...")
+                time.sleep(2)
+        except Exception as e:
+            print(f"❌ 第 {attempt+1} 次連線異常: {str(e)}")
+            if attempt == 0: time.sleep(2)
+            
+    return None
 
 def extract_links(markdown_content, base_url):
     if not base_url: return []
     links = re.findall(r'\[.*?\]\((http.*?)\)', markdown_content)
     base_domain = urlparse(base_url).netloc
-    # 過濾同網域連結並限制數量
     valid_links = [l for l in list(set(links)) if urlparse(l).netloc == base_domain]
     return valid_links[:MAX_SUB_PAGES]
 
 def analyze_with_groq(content_text, is_search=False):
-    if is_search:
-        system_prompt = "你是一位專業法規分析師。我提供給你多個搜尋來源的彙整內容，請整理出一份結構清晰、具備專業見解的繁體中文 Markdown 報告。"
-    else:
-        system_prompt = "你是一位專業法規分析師。請分析提供的網頁內容，並撰寫一份詳盡的繁體中文 Markdown 報告。"
+    system_prompt = (
+        "你是一位專業法規分析師。請根據提供的內容撰寫一份結構清晰、"
+        "具備專業見解的繁體中文 Markdown 報告。若內容包含多個來源，請進行彙整對比。"
+    )
 
     try:
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"請根據以下內容進行分析：\n\n{content_text[:15000]}"}
+                {"role": "user", "content": f"請分析以下內容並生成報告：\n\n{content_text[:15000]}"}
             ]
         )
         return completion.choices[0].message.content
     except Exception as e:
-        print(f"Groq 分析出錯: {str(e)}")
+        print(f"❌ Groq 分析出錯: {str(e)}")
         return f"AI 分析失敗: {str(e)}"
 
 # --- API 路由 ---
@@ -84,7 +93,7 @@ def home():
 
 @app.post("/research")
 async def start_research(request: ResearchRequest):
-    print(f"收到請求 - Client: {request.client_name}")
+    print(f"\n[收到請求] Client: {request.client_name}")
     
     # 模式 1：網址分析
     if request.url:
@@ -92,9 +101,8 @@ async def start_research(request: ResearchRequest):
         main_text = fetch_by_jina(request.url, mode="r")
         
         if not main_text:
-            return {"error": "無法讀取該網址內容，請確認網址是否正確或 Jina 服務是否正常。"}
+            return {"error": "無法讀取該網址內容", "details": "Jina 讀取網頁失敗，請確認網址是否公開可存取。"}
         
-        # 嘗試抓取子連結進行深度分析
         sub_links = extract_links(main_text, request.url)
         sub_texts = []
         for link in sub_links:
@@ -112,7 +120,7 @@ async def start_research(request: ResearchRequest):
         if not search_results:
             return {
                 "error": "搜尋失敗", 
-                "details": "Jina 搜尋服務未回傳結果，請嘗試更換關鍵字或稍後再試。"
+                "details": "Jina 搜尋服務目前無回應。這可能是因為搜尋量過大或關鍵字過於複雜，請嘗試更簡單的關鍵字或稍後再試。"
             }
         
         report = analyze_with_groq(search_results, is_search=True)
