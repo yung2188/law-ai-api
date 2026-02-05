@@ -62,19 +62,32 @@ def save_to_anything_llm(content, title):
 def fetch_jina_data(target, is_search=False):
     safe_target = urllib.parse.quote(target)
     
-    # 第一次嘗試：使用 Jina 標準模式 (r 或 s)
+    # 1. 優先嘗試 Jina 標準搜尋 (s.jina.ai)
     prefix = "s" if is_search else "r"
     jina_url = f"https://{prefix}.jina.ai/{safe_target}"
     
-    print(f"--- 啟動 Jina 請求 ({prefix}) --- Target: {target}")
-    
     try:
         response = requests.get(jina_url, timeout=35)
-        if response.status_code == 200 and len(response.text.strip()) > 200:
+        if response.status_code == 200 and len(response.text.strip()) > 500: # 增加長度判斷，確保不是抓到錯誤頁面
             return response.text
     except:
         pass
 
+    # 2. 備案：如果搜尋失敗，改用 DuckDuckGo (它不會擋 Jina)
+    if is_search:
+        print(f"⚠️ Jina 搜尋失敗，啟動 DuckDuckGo 備案搜尋...")
+        # DuckDuckGo 的 HTML 版本對爬蟲非常友善
+        ddg_url = f"https://duckduckgo.com/html/?q={safe_target}"
+        backup_url = f"https://r.jina.ai/{ddg_url}"
+        try:
+            res = requests.get(backup_url, timeout=30)
+            if res.status_code == 200:
+                print("✅ DuckDuckGo 備案搜尋成功！")
+                return res.text
+        except:
+            pass
+            
+    return None
     # --- 關鍵備案邏輯：如果搜尋模式失敗，強制爬取 Google 搜尋結果頁面 ---
     if is_search:
         print(f"⚠️ Jina 搜尋失敗，啟動 Google 備案搜尋...")
@@ -152,4 +165,5 @@ def home(): return {"status": "EaseMate AI Ultimate Online"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
 
