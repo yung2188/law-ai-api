@@ -1,10 +1,11 @@
 import os
 import requests
-import json
-from flask import Flask, request, Response
+from flask import Flask, request, jsonify
+from flask_cors import CORS  # 👈 新增：解決網頁跨域連線問題
 from tavily import TavilyClient
 
 app = Flask(__name__)
+CORS(app) # 👈 開啟全域支援
 
 # --- 環境變數 ---
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "tvly-dev-BqleJF10jLZhAIJHyvO050hVi3z")
@@ -16,15 +17,12 @@ tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
 def get_ai_response(query):
     try:
-        print(f"🔍 正在深度搜尋: {query}")
-        # A. Tavily 搜尋 (增加 max_results 並提升內容長度)
-        search_response = tavily.search(query=query, search_depth="advanced", max_results=3)
+        print(f"🔍 搜尋中: {query}")
+        search_response = tavily.search(query=query, search_depth="advanced", max_results=2)
         context = ""
         for r in search_response['results']:
-            # 增加到 1000 字，讓 AI 有更多素材
-            context += f"\n來源: {r['title']} ({r['url']})\n內容: {r['content'][:1000]}\n"
+            context += f"\n來源: {r['title']}\n內容: {r['content'][:800]}\n"
         
-        # B. AnythingLLM 思考 (優化角色設定)
         url = f"{ANYTHING_LLM_BASE_URL}/api/v1/workspace/{WORKSPACE_SLUG}/chat"
         headers = {
             "Authorization": f"Bearer {ANYTHING_LLM_API_KEY}",
@@ -32,45 +30,32 @@ def get_ai_response(query):
             "ngrok-skip-browser-warning": "true"
         }
         
-        # 🚀 強大的角色設定 Prompt
-        system_instruction = (
-            "你是一位專業且親切的 EaseMate AI 助手。請遵循以下規則回答：\n"
-            "1. 使用『繁體中文』回答，語氣要自然、像真人對話，不要太死板。\n"
-            "2. 針對搜尋到的資料進行『重點摘要』，使用列點方式讓結構清晰。\n"
-            "3. 如果資料中有具體的數據或法律條文，請務必保留。\n"
-            "4. 在回答最後，請列出參考的來源連結。\n"
-            "5. 如果搜尋不到相關資料，請根據你的知識庫回答，並誠實告知。"
-        )
+        system_prompt = "你是 EaseMate AI，請用繁體中文、親切且專業地回答問題，並列出重點摘要。"
+        full_prompt = f"{system_prompt}\n\n參考資料：\n{context}\n\n問題：{query}"
         
-        full_prompt = f"{system_instruction}\n\n參考資料：\n{context}\n\n用戶問題：{query}"
-        payload = {"message": full_prompt, "mode": "chat"}
-        
-        response = requests.post(url, json=payload, headers=headers, timeout=120)
+        response = requests.post(url, json={"message": full_prompt, "mode": "chat"}, headers=headers, timeout=150)
         
         if response.status_code == 200:
             return response.json().get("textResponse", "AI 暫時無法回答")
-        else:
-            return f"AnythingLLM 錯誤: {response.status_code}"
+        return f"AnythingLLM 錯誤: {response.status_code}"
     except Exception as e:
-        return f"系統異常: {str(e)}"
+        return f"連線超時或異常，請稍後再試。({str(e)})"
 
 @app.route("/research", methods=['POST'])
 def research():
     data = request.json
     user_msg = data.get("keyword") or data.get("url")
-    
     if not user_msg:
-        result = {"report": "請輸入您想查詢的內容。"}
-    else:
-        answer = get_ai_response(user_msg)
-        result = {"report": answer}
+        return jsonify({"report": "請輸入問題"}), 400
     
-    response_json = json.dumps(result, ensure_ascii=False)
-    return Response(response_json, content_type="application/json; charset=utf-8")
+    answer = get_ai_response(user_msg)
+    # 使用 jsonify 並確保不使用 ASCII 編碼以支援中文
+    app.config['JSON_AS_ASCII'] = False 
+    return jsonify({"report": answer})
 
 @app.route("/", methods=['GET'])
 def index():
-    return "EaseMate 後端已啟動"
+    return "EaseMate Backend is Running"
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
