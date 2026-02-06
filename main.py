@@ -1,40 +1,27 @@
 import os
 import requests
-import threading
-from flask import Flask, request, abort, jsonify
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from flask import Flask, request, jsonify
 from tavily import TavilyClient
 
 app = Flask(__name__)
 
-# --- 1. 環境變數設定 ---
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
-LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+# --- 環境變數 (請確保 Render 後台已填寫) ---
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "tvly-dev-BqleJF10jLZhAIJHyvO050hVi3z")
 ANYTHING_LLM_BASE_URL = os.environ.get("ANYTHING_LLM_URL", "https://ela-gravid-glenda.ngrok-free.dev")
 ANYTHING_LLM_API_KEY = os.environ.get("ANYTHING_LLM_KEY", "ZPHEBVH-6RPMJ4M-NK5VP5D-H2X6DY5")
 WORKSPACE_SLUG = os.environ.get("WORKSPACE_SLUG", "business_intelligence")
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
 tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
-# --- 2. 核心邏輯函式 (優化搜尋與超時) ---
 def get_ai_response(query):
     try:
-        # A. Tavily 搜尋 (限制結果為 2 份，減少 AI 思考負擔)
-        print(f"🔍 正在搜尋: {query}")
+        print(f"🔍 網頁正在搜尋: {query}")
+        # A. Tavily 搜尋
+        search_response = tavily.search(query=query, search_depth="advanced", max_results=2)
         context = ""
-        try:
-            search_response = tavily.search(query=query, search_depth="advanced", max_results=2)
-            for r in search_response['results']:
-                context += f"\n來源: {r['title']}\n內容: {r['content'][:500]}\n" # 限制每篇內容長度
-        except Exception as se:
-            print(f"⚠️ 搜尋暫時不可用: {se}")
-            context = "無法取得即時搜尋結果。"
-
+        for r in search_response['results']:
+            context += f"\n來源: {r['title']}\n內容: {r['content'][:500]}\n"
+        
         # B. AnythingLLM 思考
         url = f"{ANYTHING_LLM_BASE_URL}/api/v1/workspace/{WORKSPACE_SLUG}/chat"
         headers = {
@@ -42,76 +29,44 @@ def get_ai_response(query):
             "Content-Type": "application/json",
             "ngrok-skip-browser-warning": "true"
         }
+        payload = {"message": f"參考資料：{context}\n\n問題：{query}", "mode": "chat"}
         
-        # 組合 Prompt，並限制總長度
-        full_prompt = f"參考資料：{context}\n\n問題：{query}"
-        payload = {"message": full_prompt, "mode": "chat"}
-        
-        print(f"🧠 正在請求 AnythingLLM (Timeout=120s)...")
-        # 增加 timeout 到 120 秒，應對慢速回應
+        print(f"🧠 正在請求 AnythingLLM...")
         response = requests.post(url, json=payload, headers=headers, timeout=120)
         
         if response.status_code == 200:
             return response.json().get("textResponse", "AI 暫時無法回答")
         else:
-            print(f"❌ AnythingLLM 報錯: {response.status_code} - {response.text}")
+            print(f"❌ AnythingLLM 報錯: {response.text}")
             return f"AnythingLLM 錯誤: {response.status_code}"
-            
-    except requests.exceptions.Timeout:
-        return "系統忙碌中（AI 思考超時），請稍後再試一次。"
     except Exception as e:
         print(f"❌ 系統異常: {str(e)}")
         return f"系統異常: {str(e)}"
 
-# --- 3. 背景任務 (專給 LINE 使用，防止已讀不回) ---
-def line_background_task(reply_token, query):
-    answer = get_ai_response(query)
-    try:
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=answer))
-        print("✅ 成功回傳訊息給 LINE")
-    except Exception as e:
-        print(f"❌ LINE 回傳失敗: {e}")
-
-# --- 4. 路由設定 ---
-
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers.get('X-Line-Signature')
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-    return 'OK' # 立刻回傳 OK 給 LINE
-
+# --- 網頁專用接口 ---
 @app.route("/research", methods=['POST'])
 def research():
+    # 這裡會印出網頁到底傳了什麼，方便我們在 Render Logs 監看
     data = request.json
-    print(f"📥 網頁收到資料: {data}") # 這行能幫我們在 Log 看到網頁傳了什麼
+    print(f"📥 網頁傳來的原始資料: {data}")
     
-    # 嘗試從不同的欄位名稱抓取訊息
-    user_msg = data.get("message") or data.get("query") or data.get("question")
+    if not data:
+        return jsonify({"textResponse": "錯誤：後端未收到任何 JSON 資料"}), 400
+
+    # 自動偵測多種可能的欄位名稱
+    user_msg = data.get("message") or data.get("query") or data.get("question") or data.get("text")
     
     if not user_msg:
-        # 如果還是抓不到，就印出錯誤方便除錯
-        print("❌ 錯誤：收到空訊息或格式不正確")
-        return jsonify({"textResponse": "後端未收到有效訊息，請檢查格式"}), 400
+        return jsonify({"textResponse": f"錯誤：無法從資料中找到訊息內容。收到的資料為: {data}"}), 400
     
-    # 網頁版同步回傳結果
     answer = get_ai_response(user_msg)
     return jsonify({"textResponse": answer})
 
-# --- 5. LINE 訊息處理 ---
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_msg = event.message.text.strip()
-    reply_token = event.reply_token
-    
-    # 開啟背景執行緒處理 LINE 訊息
-    thread = threading.Thread(target=line_background_task, args=(reply_token, user_msg))
-    thread.start()
+# 首頁測試 (讓你直接瀏覽網址時不會看到 404)
+@app.route("/", methods=['GET'])
+def index():
+    return "法規 AI 助手後端運行中！"
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
-
