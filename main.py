@@ -87,9 +87,15 @@ def callback():
 @app.route("/research", methods=['POST'])
 def research():
     data = request.json
-    user_msg = data.get("message")
+    print(f"📥 網頁收到資料: {data}") # 這行能幫我們在 Log 看到網頁傳了什麼
+    
+    # 嘗試從不同的欄位名稱抓取訊息
+    user_msg = data.get("message") or data.get("query") or data.get("question")
+    
     if not user_msg:
-        return jsonify({"textResponse": "請輸入訊息"}), 400
+        # 如果還是抓不到，就印出錯誤方便除錯
+        print("❌ 錯誤：收到空訊息或格式不正確")
+        return jsonify({"textResponse": "後端未收到有效訊息，請檢查格式"}), 400
     
     # 網頁版同步回傳結果
     answer = get_ai_response(user_msg)
@@ -108,3 +114,4 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+
