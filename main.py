@@ -1,6 +1,7 @@
 import os
 import requests
-from flask import Flask, request, jsonify
+import json
+from flask import Flask, request, Response
 from tavily import TavilyClient
 
 app = Flask(__name__)
@@ -15,21 +16,24 @@ tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
 def get_ai_response(query):
     try:
-        print(f"🔍 正在處理網頁請求: {query}")
+        print(f"🔍 處理請求: {query}")
         # A. Tavily 搜尋
         search_response = tavily.search(query=query, search_depth="advanced", max_results=2)
         context = ""
         for r in search_response['results']:
             context += f"\n來源: {r['title']}\n內容: {r['content'][:500]}\n"
         
-        # B. AnythingLLM 思考
+        # B. AnythingLLM 思考 (加入強制中文指令)
         url = f"{ANYTHING_LLM_BASE_URL}/api/v1/workspace/{WORKSPACE_SLUG}/chat"
         headers = {
             "Authorization": f"Bearer {ANYTHING_LLM_API_KEY}",
             "Content-Type": "application/json",
             "ngrok-skip-browser-warning": "true"
         }
-        payload = {"message": f"參考資料：{context}\n\n問題：{query}", "mode": "chat"}
+        
+        # 這裡加入指令，要求 AI 必須用繁體中文回答
+        full_prompt = f"請使用『繁體中文』回答。參考資料如下：\n{context}\n\n問題：{query}"
+        payload = {"message": full_prompt, "mode": "chat"}
         
         response = requests.post(url, json=payload, headers=headers, timeout=120)
         
@@ -40,23 +44,20 @@ def get_ai_response(query):
     except Exception as e:
         return f"系統異常: {str(e)}"
 
-# --- 網頁專用接口 (對接你的 Streamlit 格式) ---
 @app.route("/research", methods=['POST'])
 def research():
     data = request.json
-    print(f"📥 收到網頁資料: {data}")
-    
-    # 1. 根據你的 Streamlit 邏輯，問題可能在 'keyword' 或 'url'
     user_msg = data.get("keyword") or data.get("url")
     
     if not user_msg:
-        return jsonify({"report": "後端未收到有效關鍵字或網址"}), 400
+        result = {"report": "後端未收到有效訊息"}
+    else:
+        answer = get_ai_response(user_msg)
+        result = {"report": answer}
     
-    # 2. 取得 AI 回答
-    answer = get_ai_response(user_msg)
-    
-    # 3. 🚀 重要：回傳的 Key 必須叫 "report"，因為你的 Streamlit 在找這個字
-    return jsonify({"report": answer})
+    # 🚀 關鍵修復：強制使用 UTF-8 編碼回傳，防止中文變成 \u4f60
+    response_json = json.dumps(result, ensure_ascii=False)
+    return Response(response_json, content_type="application/json; charset=utf-8")
 
 @app.route("/", methods=['GET'])
 def index():
